@@ -3149,7 +3149,6 @@ for line in sys.stdin:
     {'id':'mode','name':'Mode','type':'select','currentValue':config_values['mode'],'options':[{'value':'agent','name':'Agent'},{'value':'read-only','name':'Read Only'}]},
     {'id':'model','name':'Model','type':'select','currentValue':config_values['model'],'options':[{'value':'default-model','name':'Default'},{'value':'policy-model','name':'Policy'}]},
     {'id':'reasoning_effort','name':'Reasoning Effort','type':'select','currentValue':config_values['reasoning_effort'],'options':[{'value':'medium','name':'Medium'},{'value':'high','name':'High'}]},
-    {'id':'feature_flag','name':'Feature Flag','type':'boolean','currentValue':config_values['feature_flag']},
     {'id':'feature_flag','name':'Feature Flag','type':'boolean','currentValue':config_values['feature_flag']}
    ]
   else:
@@ -3175,7 +3174,8 @@ for line in sys.stdin:
    opts=[
     {'id':'mode','name':'Mode','type':'select','currentValue':config_values['mode'],'options':[{'value':'agent','name':'Agent'},{'value':'read-only','name':'Read Only'}]},
     {'id':'model','name':'Model','type':'select','currentValue':config_values['model'],'options':[{'value':'default-model','name':'Default'},{'value':'policy-model','name':'Policy'}]},
-    {'id':'reasoning_effort','name':'Reasoning Effort','type':'select','currentValue':config_values['reasoning_effort'],'options':[{'value':'medium','name':'Medium'},{'value':'high','name':'High'}]}
+    {'id':'reasoning_effort','name':'Reasoning Effort','type':'select','currentValue':config_values['reasoning_effort'],'options':[{'value':'medium','name':'Medium'},{'value':'high','name':'High'}]},
+    {'id':'feature_flag','name':'Feature Flag','type':'boolean','currentValue':config_values['feature_flag']}
    ]
   else:
    v=m['params']['value']; opts=[{'id':'mode','name':'Mode','type':'select','currentValue':v,'options':[{'value':'agent','name':'Agent'},{'value':'read-only','name':'Read Only'}]}]
