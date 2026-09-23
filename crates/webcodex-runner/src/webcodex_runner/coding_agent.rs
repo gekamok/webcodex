@@ -2853,12 +2853,21 @@ fn resolve_environment(
     Ok(result)
 }
 
+fn unique_config_option<'a>(
+    options: &'a [SessionConfigOption],
+    key: &str,
+) -> Option<&'a SessionConfigOption> {
+    let mut matches = options.iter().filter(|option| option.id.to_string() == key);
+    let option = matches.next()?;
+    matches.next().is_none().then_some(option)
+}
+
 fn config_override_is_valid(
     options: &[SessionConfigOption],
     key: &str,
     value: &CodingAgentConfigValue,
 ) -> bool {
-    let Some(option) = options.iter().find(|option| option.id.to_string() == key) else {
+    let Some(option) = unique_config_option(options, key) else {
         return false;
     };
     match (&option.kind, value) {
@@ -2884,7 +2893,7 @@ fn config_override_is_current(
     key: &str,
     value: &CodingAgentConfigValue,
 ) -> bool {
-    let Some(option) = options.iter().find(|option| option.id.to_string() == key) else {
+    let Some(option) = unique_config_option(options, key) else {
         return false;
     };
     match (&option.kind, value) {
@@ -3144,13 +3153,15 @@ for line in sys.stdin:
  elif method=='session/new':
   if scenario=='slow_configs':
    opts=[{'id':k,'name':k.title(),'type':'select','currentValue':config_values[k],'options':[{'value':'a','name':'A'},{'value':'b','name':'B'}]} for k in ('one','two','three','four')]
-  elif scenario in ('forced_configs','forced_not_applied','forced_reset_by_caller'):
+  elif scenario in ('forced_configs','forced_not_applied','forced_reset_by_caller','forced_duplicate'):
    opts=[
     {'id':'mode','name':'Mode','type':'select','currentValue':config_values['mode'],'options':[{'value':'agent','name':'Agent'},{'value':'read-only','name':'Read Only'}]},
     {'id':'model','name':'Model','type':'select','currentValue':config_values['model'],'options':[{'value':'default-model','name':'Default'},{'value':'policy-model','name':'Policy'}]},
     {'id':'reasoning_effort','name':'Reasoning Effort','type':'select','currentValue':config_values['reasoning_effort'],'options':[{'value':'medium','name':'Medium'},{'value':'high','name':'High'}]},
     {'id':'feature_flag','name':'Feature Flag','type':'boolean','currentValue':config_values['feature_flag']}
    ]
+   if scenario=='forced_duplicate':
+    opts.append({'id':'feature_flag','name':'Duplicate Feature Flag','type':'boolean','currentValue':False})
   else:
    opts=[{'id':'mode','name':'Mode','type':'select','currentValue':'agent','options':[{'value':'agent','name':'Agent'},{'value':'read-only','name':'Read Only'}]}]
   session_id='s'*70000 if scenario=='block_cancel_write' else 's1'
@@ -4873,6 +4884,46 @@ for line in sys.stdin:
         assert_eq!(
             set.pointer("/params/value").and_then(Value::as_bool),
             Some(true)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn duplicate_forced_config_id_fails_closed_without_prompt() {
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "forced_duplicate");
+        let mut cfg = fake_config(exe, args);
+        cfg.forced_config.insert(
+            "feature_flag".to_string(),
+            CodingAgentConfigValue::Bool(true),
+        );
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+        let run = "wc_agent_run_forcedduplicate01";
+        assert!(manager
+            .handle(
+                start_request(&manager, &root, run, BTreeMap::new()),
+                &projects,
+            )
+            .error
+            .is_none());
+        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
+        assert_eq!(terminal.state, CodingAgentRunState::Failed);
+        assert_eq!(
+            terminal
+                .terminal
+                .as_ref()
+                .and_then(|terminal| terminal.error_code.as_deref()),
+            Some("coding_agent_forced_config_invalid")
+        );
+        assert!(received_config_ids(&wire_log(&temp)).is_empty());
+        assert_eq!(
+            received_methods(&wire_log(&temp))
+                .iter()
+                .filter(|method| method.as_str() == "session/prompt")
+                .count(),
+            0
         );
     }
 
