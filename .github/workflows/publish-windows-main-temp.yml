@@ -1,0 +1,41 @@
+name: Publish Windows main installer
+
+on:
+  push:
+    branches:
+      - publish/windows-main-d0165f3
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download already-built Windows artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          gh run download 35842980122             --repo "$GITHUB_REPOSITORY"             --name webcodex-main-win32-x64             --dir release-assets
+          find release-assets -maxdepth 2 -type f -print
+          test "$(find release-assets -type f -name '*-setup.exe' | wc -l)" -eq 1
+
+      - name: Verify and publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: d0165f37911c6433ff48fee72458b2c4cd20168c
+        run: |
+          set -euo pipefail
+          installer="$(find release-assets -type f -name '*-setup.exe' -print -quit)"
+          sha256sum "$installer" | tee "$installer.sha256"
+          tag="main-d0165f3-win32-x64"
+          title="WebCodex main d0165f3 - Windows x64"
+          notes="Windows x64 Desktop installer built from gekamok/webcodex main at d0165f37911c6433ff48fee72458b2c4cd20168c, which contains upstream merged PR #648 (Runner-global ACP forced_config). Build workflow run: 35842980122. The installer passed the repository Windows install smoke test."
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "$installer" "$installer.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" "$installer" "$installer.sha256"               --repo "$GITHUB_REPOSITORY"               --target "$SOURCE_SHA"               --title "$title"               --notes "$notes"
+          fi
