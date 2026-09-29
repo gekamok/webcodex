@@ -138,7 +138,6 @@ jobs:
             runs_json="$(gh run list \
               --repo "$GITHUB_REPOSITORY" \
               --workflow release-build.yml \
-              --branch "$build_tag" \
               --event workflow_dispatch \
               --limit 30 \
               --json databaseId,displayTitle,headSha,status,conclusion)"
