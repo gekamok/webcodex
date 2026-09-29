@@ -86,7 +86,7 @@ jobs:
           }
 
           $cli = Join-Path $root "webcodex-runtime\webcodex.exe"
-          $version = (& $cli --version | Select-Object -First 1)
+          $version = ((& $cli --version) -join " ")
           if ($LASTEXITCODE -ne 0 -or $version -notmatch '0\.4\.3') {
             throw "installed v0.4.3 CLI identity check failed: $version"
           }
