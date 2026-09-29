@@ -4,7 +4,6 @@ run-name: Daily upstream nightly ${{ github.event_name }}
 
 on:
   schedule:
-    # GitHub cron is UTC. 21:00 UTC = 05:00 next day in Beijing (UTC+8).
     - cron: "0 21 * * *"
   push:
     branches:
@@ -29,8 +28,7 @@ concurrency:
 
 env:
   UPSTREAM_REPOSITORY: yyjeqhc/webcodex
-  TRACKING_BRANCH: nightly-upstream
-  SUCCESS_BRANCH: nightly-built
+  BASELINE_SHA: d0165f37911c6433ff48fee72458b2c4cd20168c
 
 jobs:
   nightly:
@@ -51,18 +49,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git remote add upstream "https://github.com/$UPSTREAM_REPOSITORY.git"
           git fetch --no-tags upstream main
           upstream_sha="$(git rev-parse FETCH_HEAD)"
           short_sha="${upstream_sha:0:12}"
 
-          last_built=""
-          if git ls-remote --exit-code --heads origin "$SUCCESS_BRANCH" >/dev/null 2>&1; then
-            git fetch --no-tags origin "$SUCCESS_BRANCH"
-            last_built="$(git rev-parse FETCH_HEAD)"
+          last_built="$BASELINE_SHA"
+          latest_nightly="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,publishedAt --jq '[.[] | select(.tagName | startswith("nightly-"))] | sort_by(.publishedAt) | last | .tagName // empty')"
+          if [ -n "$latest_nightly" ]; then
+            body="$(gh release view "$latest_nightly" --repo "$GITHUB_REPOSITORY" --json body --jq .body)"
+            recorded="$(printf '%s\n' "$body" | sed -nE 's/^- Source commit: ([0-9a-f]{40})$/\1/p' | head -n 1)"
+            if [ -n "$recorded" ]; then
+              last_built="$recorded"
+            fi
           fi
 
           force=false
@@ -72,7 +71,6 @@ jobs:
 
           beijing_date="$(TZ=Asia/Shanghai date +%Y%m%d)"
           release_tag="nightly-${beijing_date}-${short_sha}"
-          build_tag="release-build-test-nightly-${beijing_date}-${short_sha}"
           request_seed="${upstream_sha}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
           request_id="rb_$(printf '%s' "$request_seed" | sha256sum | cut -c1-24)"
 
@@ -81,52 +79,31 @@ jobs:
             echo "short_sha=$short_sha"
             echo "last_built=$last_built"
             echo "release_tag=$release_tag"
-            echo "build_tag=$build_tag"
             echo "request_id=$request_id"
           } >> "$GITHUB_OUTPUT"
 
-          echo "Upstream SHA: $upstream_sha"
-          echo "Last successful nightly: ${last_built:-none}"
-
-          if [ "$force" != true ] && [ -n "$last_built" ] && [ "$upstream_sha" = "$last_built" ]; then
-            echo "No upstream changes since the last successful nightly."
+          if [ "$force" != true ] && [ "$upstream_sha" = "$last_built" ]; then
             echo "should_build=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           echo "should_build=true" >> "$GITHUB_OUTPUT"
 
-      - name: Publish upstream tracking ref and temporary build tag
-        if: steps.detect.outputs.should_build == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          upstream_sha="${{ steps.detect.outputs.upstream_sha }}"
-          build_tag="${{ steps.detect.outputs.build_tag }}"
-
-          git push origin "$upstream_sha:refs/heads/$TRACKING_BRANCH" --force
-
-          git push origin ":refs/tags/$build_tag" >/dev/null 2>&1 || true
-          git tag -d "$build_tag" >/dev/null 2>&1 || true
-          git tag -a "$build_tag" "$upstream_sha" -m "Nightly build source $upstream_sha"
-          git push origin "refs/tags/$build_tag"
-
-      - name: Dispatch existing multi-platform release build
+      - name: Dispatch upstream-SHA multi-platform build
         if: steps.detect.outputs.should_build == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-
-          gh workflow run release-build.yml \
+          gh workflow run nightly-release-build.yml \
             --repo "$GITHUB_REPOSITORY" \
-            --ref "${{ steps.detect.outputs.build_tag }}" \
-            -f "tag=${{ steps.detect.outputs.build_tag }}" \
+            --ref main \
+            -f "source_sha=${{ steps.detect.outputs.upstream_sha }}" \
+            -f "tag=nightly" \
             -f "request_id=${{ steps.detect.outputs.request_id }}"
 
-      - name: Wait for release build
+      - name: Wait for multi-platform build
         if: steps.detect.outputs.should_build == 'true'
         id: build
         shell: bash
@@ -135,17 +112,16 @@ jobs:
         run: |
           set -euo pipefail
 
-          build_tag="${{ steps.detect.outputs.build_tag }}"
           request_id="${{ steps.detect.outputs.request_id }}"
           run_id=""
 
           for _ in $(seq 1 60); do
             runs_json="$(gh run list \
               --repo "$GITHUB_REPOSITORY" \
-              --workflow release-build.yml \
+              --workflow nightly-release-build.yml \
               --event workflow_dispatch \
               --limit 30 \
-              --json databaseId,displayTitle,headSha,status,conclusion)"
+              --json databaseId,displayTitle,status,conclusion)"
 
             run_id="$(jq -r --arg request_id "$request_id" '
               .[]
@@ -160,12 +136,11 @@ jobs:
           done
 
           if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
-            echo "Could not locate the dispatched release-build run." >&2
+            echo "Could not locate the dispatched nightly build run." >&2
             exit 1
           fi
 
           echo "release_build_run_id=$run_id" >> "$GITHUB_OUTPUT"
-          echo "Waiting for release-build run $run_id"
           gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 15
 
       - name: Download assembled release bundle
@@ -183,19 +158,13 @@ jobs:
             --jq '.artifacts[] | select(.name | endswith("-bundle")) | .name' \
             | head -n 1)"
 
-          if [ -z "$artifact_name" ]; then
-            echo "The release-build run produced no assembled bundle artifact." >&2
-            exit 1
-          fi
-
+          test -n "$artifact_name"
           rm -rf release-bundle
           mkdir -p release-bundle
           gh run download "$run_id" \
             --repo "$GITHUB_REPOSITORY" \
             --name "$artifact_name" \
             --dir release-bundle
-
-          test -n "$(find release-bundle -maxdepth 1 -type f -print -quit)"
 
       - name: Publish nightly release
         if: steps.detect.outputs.should_build == 'true'
@@ -211,11 +180,6 @@ jobs:
           release_tag="${{ steps.detect.outputs.release_tag }}"
           build_run_id="${{ steps.build.outputs.release_build_run_id }}"
 
-          if ! git ls-remote --exit-code --tags origin "refs/tags/$release_tag" >/dev/null 2>&1; then
-            git tag -a "$release_tag" "$upstream_sha" -m "WebCodex nightly $short_sha"
-            git push origin "refs/tags/$release_tag"
-          fi
-
           {
             echo "# WebCodex Nightly"
             echo
@@ -225,42 +189,25 @@ jobs:
             echo "- Build workflow run: $build_run_id"
             echo "- Scheduled check: daily at 05:00 Beijing time (UTC+8)"
             echo
-            if [ -n "$last_built" ] && git cat-file -e "$last_built^{commit}" 2>/dev/null; then
-              echo "## Changes since previous successful nightly"
-              echo
-              if git merge-base --is-ancestor "$last_built" "$upstream_sha" 2>/dev/null; then
-                git log --format='- %s (%h)' --max-count=100 "$last_built..$upstream_sha"
-              else
-                echo "- Previous nightly is not an ancestor of this source; showing the latest upstream commits instead."
-                git log --format='- %s (%h)' --max-count=30 "$upstream_sha"
-              fi
+            echo "## Changes since previous successful nightly"
+            echo
+            if git merge-base --is-ancestor "$last_built" "$upstream_sha" 2>/dev/null; then
+              git log --format='- %s (%h)' --max-count=100 "$last_built..$upstream_sha"
             else
-              echo "## Source history"
-              echo
               git log --format='- %s (%h)' --max-count=30 "$upstream_sha"
             fi
           } > release-notes.md
 
           if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$release_tag" release-bundle/* \
-              --repo "$GITHUB_REPOSITORY" \
-              --clobber
+            gh release upload "$release_tag" release-bundle/* --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$release_tag" release-bundle/* \
               --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
+              --target main \
               --prerelease \
               --title "WebCodex Nightly $short_sha" \
               --notes-file release-notes.md
           fi
-
-          git push origin "$upstream_sha:refs/heads/$SUCCESS_BRANCH" --force
-
-      - name: Remove temporary build tag
-        if: always() && steps.detect.outputs.should_build == 'true'
-        shell: bash
-        run: |
-          git push origin ":refs/tags/${{ steps.detect.outputs.build_tag }}" >/dev/null 2>&1 || true
 
       - name: Summary
         if: always()
@@ -269,11 +216,8 @@ jobs:
           {
             echo "### Daily upstream nightly"
             echo "- upstream: $UPSTREAM_REPOSITORY/main"
-            echo "- check schedule: 05:00 Beijing time (21:00 UTC)"
+            echo "- schedule: 05:00 Beijing time"
             echo "- upstream SHA: ${{ steps.detect.outputs.upstream_sha }}"
-            echo "- previous successful SHA: ${{ steps.detect.outputs.last_built || 'none' }}"
+            echo "- previous successful SHA: ${{ steps.detect.outputs.last_built }}"
             echo "- build requested: ${{ steps.detect.outputs.should_build }}"
-            if [ "${{ steps.detect.outputs.should_build }}" = "true" ]; then
-              echo "- release tag: ${{ steps.detect.outputs.release_tag }}"
-            fi
           } >> "$GITHUB_STEP_SUMMARY"
