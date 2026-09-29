@@ -1,0 +1,171 @@
+name: Windows v0.4.3 upgrade compatibility
+
+run-name: v0.4.3 upgrade compatibility against upstream main
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/v043-compat-trigger"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-v043-upgrade-compat
+  cancel-in-progress: true
+
+jobs:
+  compatibility:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out current upstream source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: yyjeqhc/webcodex
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+          path: upstream
+
+      - name: Record upstream source
+        id: source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Push-Location upstream
+          $sha = (git rev-parse HEAD).Trim()
+          Pop-Location
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          "Testing upstream source: $sha"
+
+      - name: Download and verify official v0.4.3 Windows x64 installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path legacy | Out-Null
+          $base = "https://github.com/yyjeqhc/webcodex/releases/download/v0.4.3"
+          $installer = Join-Path $PWD "legacy\webcodex-desktop-v0.4.3-win32-x64-setup.exe"
+          $sums = Join-Path $PWD "legacy\SHA256SUMS"
+          Invoke-WebRequest -UseBasicParsing "$base/webcodex-desktop-v0.4.3-win32-x64-setup.exe" -OutFile $installer
+          Invoke-WebRequest -UseBasicParsing "$base/SHA256SUMS" -OutFile $sums
+          $line = Get-Content -LiteralPath $sums | Where-Object { $_ -match 'webcodex-desktop-v0\.4\.3-win32-x64-setup\.exe$' } | Select-Object -First 1
+          if (-not $line) { throw "v0.4.3 checksum entry is missing" }
+          $expected = ($line -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "v0.4.3 installer checksum mismatch" }
+
+      - name: Install official v0.4.3
+        id: legacy
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Join-Path $PWD "legacy\webcodex-desktop-v0.4.3-win32-x64-setup.exe"
+          $proc = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "v0.4.3 installer failed with exit code $($proc.ExitCode)" }
+
+          $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\WebCodex Desktop"
+          if (-not (Test-Path $key)) { throw "v0.4.3 uninstall registry key is missing" }
+          $root = (Get-ItemProperty -LiteralPath $key).InstallLocation.Trim('"')
+          if (-not $root) { throw "v0.4.3 InstallLocation is empty" }
+
+          $paths = @(
+            (Join-Path $root "WebCodex.exe"),
+            (Join-Path $root "webcodex-runtime\webcodex.exe"),
+            (Join-Path $root "webcodex-runtime\webcodex-server.exe"),
+            (Join-Path $root "webcodex-runtime\webcodex-runner.exe")
+          )
+          foreach ($path in $paths) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "v0.4.3 managed executable missing: $path"
+            }
+          }
+
+          $cli = Join-Path $root "webcodex-runtime\webcodex.exe"
+          $version = (& $cli --version | Select-Object -First 1)
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '0\.4\.3') {
+            throw "installed v0.4.3 CLI identity check failed: $version"
+          }
+
+          Set-Content -LiteralPath (Join-Path $root "legacy-upgrade-sentinel.txt") -Value "preserve-me" -Encoding ascii
+          "install_root=$root" >> $env:GITHUB_OUTPUT
+          "cli=$cli" >> $env:GITHUB_OUTPUT
+
+      - name: Probe the exact legacy CLI command required by current bootstrap
+        id: probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $cli = "${{ steps.legacy.outputs.cli }}"
+          $dummy = Join-Path $env:RUNNER_TEMP "webcodex-v043-compat-dummy"
+          New-Item -ItemType Directory -Force -Path $dummy | Out-Null
+
+          $psi = [System.Diagnostics.ProcessStartInfo]::new()
+          $psi.FileName = $cli
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardOutput = $true
+          $psi.RedirectStandardError = $true
+          foreach ($arg in @("environment","upgrade-preflight","--candidate-dir",$dummy,"--json")) {
+            [void]$psi.ArgumentList.Add($arg)
+          }
+          $p = [System.Diagnostics.Process]::new()
+          $p.StartInfo = $psi
+          [void]$p.Start()
+          $stdout = $p.StandardOutput.ReadToEnd()
+          $stderr = $p.StandardError.ReadToEnd()
+          $p.WaitForExit()
+
+          $evidence = [ordered]@{
+            cli = $cli
+            exit_code = $p.ExitCode
+            stdout = $stdout
+            stderr = $stderr
+          }
+          $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "legacy-cli-probe.json" -Encoding utf8
+          "exit_code=$($p.ExitCode)" >> $env:GITHUB_OUTPUT
+
+      - name: Audit current bootstrap legacy handoff
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $script = Get-Content -LiteralPath "upstream\scripts\build_windows_unified_bootstrap.py" -Raw
+
+          $selectsOldCli = $script.Contains('StrCpy $WebCodexTrustedCLI "$WebCodexInstallDir\\webcodex-runtime\\webcodex.exe"')
+          $usesPreflight = $script.Contains('"$WebCodexTrustedCLI" environment upgrade-preflight')
+          $legacyExit = [int]"${{ steps.probe.outputs.exit_code }}"
+
+          $result = [ordered]@{
+            upstream_sha = "${{ steps.source.outputs.sha }}"
+            baseline = "v0.4.3"
+            old_cli_selected_by_bootstrap = $selectsOldCli
+            bootstrap_calls_upgrade_preflight_through_selected_cli = $usesPreflight
+            v043_upgrade_preflight_exit_code = $legacyExit
+            compatible = -not ($selectsOldCli -and $usesPreflight -and $legacyExit -ne 0)
+          }
+          $result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "compatibility-result.json" -Encoding utf8
+
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "### Windows v0.4.3 upgrade compatibility"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "- upstream SHA: ${{ steps.source.outputs.sha }}"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "- v0.4.3 CLI upgrade-preflight exit: $legacyExit"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "- current bootstrap selects installed legacy CLI: $selectsOldCli"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "- current bootstrap calls upgrade-preflight through that CLI: $usesPreflight"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "- compatibility: $($result.compatible)"
+
+          if (-not $result.compatible) {
+            throw "INCOMPATIBLE: current unified bootstrap selects the v0.4.3 CLI, but that CLI cannot execute the required environment upgrade-preflight command."
+          }
+
+      - name: Upload compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-v043-upgrade-compat-evidence
+          path: |
+            legacy-cli-probe.json
+            compatibility-result.json
+          if-no-files-found: warn
+          retention-days: 14
