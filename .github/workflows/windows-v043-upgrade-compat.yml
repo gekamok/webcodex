@@ -3,7 +3,18 @@ name: Windows v0.4.3 upgrade compatibility
 run-name: v0.4.3 upgrade compatibility against upstream main
 
 on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact upstream commit to audit; defaults to upstream main
+        required: false
+        type: string
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact upstream commit to audit; defaults to upstream main
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -27,7 +38,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: yyjeqhc/webcodex
-          ref: main
+          ref: ${{ inputs.source_sha || 'main' }}
           fetch-depth: 1
           persist-credentials: false
           path: upstream
