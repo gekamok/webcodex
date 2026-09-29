@@ -6,6 +6,11 @@ on:
   schedule:
     # GitHub cron is UTC. 21:00 UTC = 05:00 next day in Beijing (UTC+8).
     - cron: "0 21 * * *"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/nightly-trigger"
   workflow_dispatch:
     inputs:
       force:
