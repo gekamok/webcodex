@@ -850,6 +850,13 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+
+  windows-v043-upgrade-compat:
+    needs: prepare
+    uses: ./.github/workflows/windows-v043-upgrade-compat.yml
+    with:
+      source_sha: ${{ needs.prepare.outputs.source_sha }}
+
   unified-native:
     needs: [prepare, linux, macos]
     strategy:
@@ -1058,7 +1065,7 @@ jobs:
           compression-level: 0
 
   assemble:
-    needs: [prepare, linux, macos, windows, unified-native]
+    needs: [prepare, linux, macos, windows, unified-native, windows-v043-upgrade-compat]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
