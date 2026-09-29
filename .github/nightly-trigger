@@ -1,2 +1,2 @@
-manual trigger: 2026-09-29T12:20:00+08:00
-requested action: sync yyjeqhc/webcodex main and run nightly multi-platform build
+manual trigger: retry-after-upstream-sha-builder-fix
+source: b967a1556ac58b50e32c8399196979fdbae1713c
