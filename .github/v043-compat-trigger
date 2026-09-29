@@ -1,2 +1,2 @@
-trigger: retry-version-probe
+trigger: windows-2022
 purpose: test upstream main compatibility with official v0.4.3 Windows x64 install
