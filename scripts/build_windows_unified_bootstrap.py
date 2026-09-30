@@ -113,7 +113,7 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
     for name in candidate.BINARIES:
         lines.append(f'  File /oname={name}.exe {nsis_quote(files[name])}')
     lines.extend([
-        f'  ExecWait \'"$WINDIR\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -Command "$h=(Get-FileHash -Algorithm SHA256 -LiteralPath $args[0]).Hash.ToLowerInvariant(); if($h -ne {manifest["artifacts"]["webcodex"]["sha256"]}){{exit 1}}" "$WebCodexCandidate\\artifacts\\bin\\webcodex.exe"\' $0',
+        f'  ExecWait \'"$WINDIR\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -Command "$h=(Get-FileHash -Algorithm SHA256 -LiteralPath $args[0]).Hash.ToLowerInvariant(); if($h -ne \'{manifest["artifacts"]["webcodex"]["sha256"]}\'){{exit 1}}" "$WebCodexCandidate\\artifacts\\bin\\webcodex.exe"\' $0',
         '  ${If} $0 != 0',
         '    MessageBox MB_ICONSTOP "WebCodex candidate CLI failed its manifest-bound SHA-256 check."',
         '    SetErrorLevel 1',
