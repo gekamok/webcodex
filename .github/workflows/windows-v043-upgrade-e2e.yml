@@ -49,6 +49,10 @@ jobs:
           using System.Security.Cryptography;
 
           public static class Candidate {
+              static void Log(string text) {
+                  var path = Environment.GetEnvironmentVariable("STUB_LOG");
+                  if (!String.IsNullOrEmpty(path)) File.AppendAllText(path, DateTime.UtcNow.ToString("o") + " candidate " + text + Environment.NewLine);
+              }
               static string Hash(string path) {
                   using (var sha = SHA256.Create())
                   using (var stream = File.OpenRead(path)) {
@@ -64,7 +68,8 @@ jobs:
               }
 
               public static int Main(string[] args) {
-                  if (args.Length >= 2 && args[0] == "environment" && args[1] == "--help") return 0;
+                  Log("args=" + String.Join(" ", args));
+                  if (args.Length >= 2 && args[0] == "environment" && args[1] == "--help") { Log("help=0"); return 0; }
                   if (args.Length >= 2 && args[0] == "environment" && args[1] == "installer-verify-same") {
                       var runtime = Option(args, "--expected-runtime-dir");
                       var source = Environment.GetEnvironmentVariable("STUB_CANDIDATE_BIN");
@@ -77,10 +82,12 @@ jobs:
                           new [] { Path.Combine(source, "webcodex-desktop.exe"), Path.Combine(root, "WebCodex.exe") },
                       };
                       foreach (var pair in pairs) {
-                          if (!File.Exists(pair[0]) || !File.Exists(pair[1]) || Hash(pair[0]) != Hash(pair[1])) return 21;
+                          if (!File.Exists(pair[0]) || !File.Exists(pair[1]) || Hash(pair[0]) != Hash(pair[1])) { Log("verify=21 " + pair[1]); return 21; }
                       }
+                      Log("verify=0");
                       return 0;
                   }
+                  Log("other=0");
                   return 0;
               }
           }
@@ -92,7 +99,12 @@ jobs:
           using Microsoft.Win32;
 
           public static class Inner {
+              static void Log(string text) {
+                  var path = Environment.GetEnvironmentVariable("STUB_LOG");
+                  if (!String.IsNullOrEmpty(path)) File.AppendAllText(path, DateTime.UtcNow.ToString("o") + " inner " + text + Environment.NewLine);
+              }
               public static int Main(string[] args) {
+                  Log("start args=" + String.Join(" ", args));
                   var source = Environment.GetEnvironmentVariable("STUB_CANDIDATE_BIN");
                   if (String.IsNullOrEmpty(source)) return 30;
                   using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\WebCodex Desktop")) {
@@ -106,7 +118,9 @@ jobs:
                       File.Copy(Path.Combine(source, "webcodex-server.exe"), Path.Combine(runtime, "webcodex-server.exe"), true);
                       File.Copy(Path.Combine(source, "webcodex-runner.exe"), Path.Combine(runtime, "webcodex-runner.exe"), true);
                       File.Copy(Path.Combine(source, "webcodex-desktop.exe"), Path.Combine(root, "WebCodex.exe"), true);
+                      Log("copies=done root=" + root);
                   }
+                  Log("exit=0");
                   return 0;
               }
           }
@@ -208,8 +222,17 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $env:STUB_CANDIDATE_BIN = (Resolve-Path "synthetic-candidate\artifacts\bin").Path
-          $p = Start-Process -FilePath (Resolve-Path "synthetic-unified.exe") -ArgumentList "/S" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "patched synthetic unified upgrade failed with exit code $($p.ExitCode)" }
+          $env:STUB_LOG = Join-Path $PWD "stub-invocations.log"
+          $p = Start-Process -FilePath (Resolve-Path "synthetic-unified.exe") -ArgumentList "/S" -PassThru
+          if (-not $p.WaitForExit(60000)) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $env:STUB_LOG) { Get-Content -LiteralPath $env:STUB_LOG }
+            throw "patched synthetic unified upgrade did not terminate within 60 seconds"
+          }
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $env:STUB_LOG) { Get-Content -LiteralPath $env:STUB_LOG }
+            throw "patched synthetic unified upgrade failed with exit code $($p.ExitCode)"
+          }
 
           $root = $env:LEGACY_INSTALL_ROOT
           $runtime = Join-Path $root "webcodex-runtime"
@@ -249,5 +272,6 @@ jobs:
             synthetic-unified.nsi
             synthetic-unified.exe
             synthetic-e2e-result.json
+            stub-invocations.log
           if-no-files-found: warn
           retention-days: 14
