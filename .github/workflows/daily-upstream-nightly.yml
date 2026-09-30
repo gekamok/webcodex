@@ -3,8 +3,6 @@ name: Daily upstream nightly release
 run-name: Daily upstream nightly ${{ github.event_name }}
 
 on:
-  schedule:
-    - cron: "0 21 * * *"
   push:
     branches:
       - main
