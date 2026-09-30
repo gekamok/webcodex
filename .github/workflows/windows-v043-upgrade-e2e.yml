@@ -252,52 +252,8 @@ jobs:
           }
 
           $invocations = @(Get-Content -LiteralPath $env:STUB_LOG -ErrorAction Stop)
-          if ($invocations | Where-Object { $_ -match '^candidate args=[0-9a-fA-F]{64}
-          $runtime = Join-Path $root "webcodex-runtime"
-          $pairs = @(
-            @((Join-Path $env:STUB_CANDIDATE_BIN "webcodex.exe"), (Join-Path $runtime "webcodex.exe")),
-            @((Join-Path $env:STUB_CANDIDATE_BIN "webcodex-server.exe"), (Join-Path $runtime "webcodex-server.exe")),
-            @((Join-Path $env:STUB_CANDIDATE_BIN "webcodex-runner.exe"), (Join-Path $runtime "webcodex-runner.exe")),
-            @((Join-Path $env:STUB_CANDIDATE_BIN "webcodex-desktop.exe"), (Join-Path $root "WebCodex.exe"))
-          )
-          foreach ($pair in $pairs) {
-            $want = (Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash
-            $got = (Get-FileHash -LiteralPath $pair[1] -Algorithm SHA256).Hash
-            if ($want -ne $got) { throw "installed managed executable does not match synthetic candidate: $($pair[1])" }
-          }
-          if ((Get-Content -LiteralPath (Join-Path $root "legacy-upgrade-sentinel.txt") -Raw).Trim() -ne "preserve-me") {
-            throw "legacy non-managed sentinel was not preserved"
-          }
-          $environmentRecord = Join-Path $env:APPDATA "webcodex\environment\environment.json"
-          if (Test-Path -LiteralPath $environmentRecord) {
-            throw "package-only legacy upgrade unexpectedly fabricated an EnvironmentStore"
-          }
-
-          [ordered]@{
-            official_v043_installed = $true
-            patched_outer_exit = $p.ExitCode
-            all_four_managed_executables_replaced = $true
-            unmanaged_sentinel_preserved = $true
-            environment_store_fabricated = $false
-          } | ConvertTo-Json | Set-Content -LiteralPath synthetic-e2e-result.json -Encoding utf8
-
-      - name: Upload E2E evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: windows-v043-upgrade-synthetic-e2e
-          path: |
-            synthetic-unified.nsi
-            synthetic-unified.exe
-            synthetic-e2e-result.json
-            stub-invocations.log
-          if-no-files-found: warn
-          retention-days: 14
- }) {
-            throw "candidate CLI was executed during the pre-execution hash gate"
-          }
-          if ($invocations | Where-Object { $_ -match '^candidate unexpected=' }) {
-            throw "candidate CLI received an unexpected pre-verification invocation"
+          if ($invocations | Where-Object { $_ -like 'candidate unexpected=*' }) {
+            throw "candidate CLI received an unexpected invocation before package verification"
           }
           $firstCandidate = $invocations | Where-Object { $_ -like 'candidate args=*' } | Select-Object -First 1
           if ($firstCandidate -notlike 'candidate args=environment installer-verify-same*') {
