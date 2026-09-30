@@ -112,9 +112,9 @@ jobs:
           }
           '@ | Set-Content -LiteralPath Inner.cs -Encoding ascii
 
-          & $csc /nologo /target:exe /out:candidate-stub.exe Candidate.cs
+          & $csc /nologo /target:exe /platform:x64 /out:candidate-stub.exe Candidate.cs
           if ($LASTEXITCODE -ne 0) { throw "candidate stub compile failed" }
-          & $csc /nologo /target:exe /out:inner-stub.exe Inner.cs
+          & $csc /nologo /target:exe /platform:x64 /out:inner-stub.exe Inner.cs
           if ($LASTEXITCODE -ne 0) { throw "inner stub compile failed" }
 
       - name: Build synthetic unified outer installer from production bootstrap
