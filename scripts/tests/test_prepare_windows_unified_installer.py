@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import importlib.util
-import re
 import json
 import os
 import sys
@@ -168,18 +166,17 @@ class WindowsUnifiedNsisTests(unittest.TestCase):
             self.assertIn("upgrade-finish", section)
             self.assertIn("upgrade-rollback", script)
             self.assertIn(r'"$WebCodexTrustedCLI" environment upgrade-rollback', script)
-            self.assertIn("-EncodedCommand ", section)
-            encoded = re.search(r"-EncodedCommand ([A-Za-z0-9+/=]+)", section)
-            self.assertIsNotNone(encoded)
-            hash_script = base64.b64decode(encoded.group(1)).decode("utf-16le")
-            self.assertIn("$env:WEBCODEX_INSTALLER_VERIFY_CLI", hash_script)
-            self.assertIn("$env:WEBCODEX_INSTALLER_VERIFY_SHA256", hash_script)
-            self.assertIn("Get-FileHash -Algorithm SHA256 -LiteralPath $p", hash_script)
-            self.assertIn("if($h -ne $e){exit 1}", hash_script)
-            self.assertNotIn("$args", hash_script)
-            self.assertRegex(section, r'SetEnvironmentVariable\(t "WEBCODEX_INSTALLER_VERIFY_SHA256", t "[0-9a-f]{64}"\)')
-            self.assertIn('SetEnvironmentVariable(t "WEBCODEX_INSTALLER_VERIFY_CLI", p 0)', section)
-            self.assertIn('SetEnvironmentVariable(t "WEBCODEX_INSTALLER_VERIFY_SHA256", p 0)', section)
+            self.assertIn("File /oname=WebCodexVerifyCandidate.ps1", section)
+            self.assertIn(
+                '-ExecutionPolicy Bypass -File "$PLUGINSDIR\\WebCodexVerifyCandidate.ps1"',
+                section,
+            )
+            self.assertRegex(
+                section,
+                r'WebCodexVerifyCandidate\.ps1" "\$WebCodexCandidate\\artifacts\\bin\\webcodex\.exe" "[0-9a-f]{64}"',
+            )
+            self.assertNotIn("SetEnvironmentVariable", section)
+            self.assertNotIn("-EncodedCommand", section)
             self.assertIn("manifest-bound SHA-256 check", section)
             self.assertIn('"$WebCodexTrustedCLI" environment installer-verify-same', section)
             self.assertIn('"$WebCodexInstallDir\\webcodex-runtime\\webcodex.exe" environment --help', section)
