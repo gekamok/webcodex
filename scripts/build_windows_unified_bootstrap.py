@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import shutil
@@ -33,6 +34,12 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
     if inner.read_bytes()[:2] != b"MZ":
         raise ValueError("inner Tauri installer is not a Windows executable")
     target = "x86_64" if platform == "win32-x64" else "aarch64"
+    cli_sha256 = manifest["artifacts"]["webcodex"]["sha256"]
+    hash_script = (
+        "$h=(Get-FileHash -Algorithm SHA256 -LiteralPath 'webcodex.exe').Hash.ToLowerInvariant();"
+        f"if($h -ne '{cli_sha256}'){{exit 1}}"
+    )
+    hash_command = base64.b64encode(hash_script.encode("utf-16le")).decode("ascii")
     lines = [
         'Unicode true',
         '!include "LogicLib.nsh"',
@@ -113,7 +120,7 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
     for name in candidate.BINARIES:
         lines.append(f'  File /oname={name}.exe {nsis_quote(files[name])}')
     lines.extend([
-        f'  ExecWait \'"$WINDIR\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -Command "$h=(Get-FileHash -Algorithm SHA256 -LiteralPath $args[0]).Hash.ToLowerInvariant(); if($h -ne $args[1]){{exit 1}}" "$WebCodexCandidate\\artifacts\\bin\\webcodex.exe" "{manifest["artifacts"]["webcodex"]["sha256"]}"\' $0',
+        f'  ExecWait \'"$WINDIR\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -EncodedCommand {hash_command}\' $0',
         '  ${If} $0 != 0',
         '    MessageBox MB_ICONSTOP "WebCodex candidate CLI failed its manifest-bound SHA-256 check."',
         '    SetErrorLevel 1',
