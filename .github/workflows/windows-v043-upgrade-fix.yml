@@ -96,20 +96,12 @@ jobs:
           '@ | python -
           if ($LASTEXITCODE -ne 0) { throw "outer NSIS bootstrap compile smoke failed" }
 
-      - name: Exercise encoded candidate hash gate
+      - name: Exercise embedded candidate hash verifier
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           @'
-          import re
           from pathlib import Path
-          text = Path("bootstrap-smoke.nsi").read_text(encoding="utf-8")
-          match = re.search(r"-EncodedCommand ([A-Za-z0-9+/=]+)", text)
-          expected = re.search(r'WEBCODEX_INSTALLER_VERIFY_SHA256", t "([0-9a-f]{64})"', text)
-          if not match or not expected:
-              raise SystemExit("encoded hash command or expected digest missing")
-          Path("hash-command.txt").write_text(match.group(1), encoding="ascii")
-          Path("hash-expected.txt").write_text(expected.group(1), encoding="ascii")
           data = bytearray(128)
           data[:2] = b"MZ"
           data[0x3C:0x40] = (64).to_bytes(4, "little")
@@ -119,17 +111,18 @@ jobs:
           root.mkdir(exist_ok=True)
           (root / "webcodex.exe").write_bytes(data)
           '@ | python -
-          $encoded = (Get-Content -LiteralPath hash-command.txt -Raw).Trim()
-          $env:WEBCODEX_INSTALLER_VERIFY_CLI = (Resolve-Path "hash-fixture\webcodex.exe").Path
-          $env:WEBCODEX_INSTALLER_VERIFY_SHA256 = (Get-Content -LiteralPath hash-expected.txt -Raw).Trim()
-          & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -EncodedCommand $encoded
+
+          $candidate = (Resolve-Path "hash-fixture\webcodex.exe").Path
+          $expected = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts\verify_windows_unified_candidate.ps1 $candidate $expected
           $good = $LASTEXITCODE
-          $stream = [System.IO.File]::Open($env:WEBCODEX_INSTALLER_VERIFY_CLI, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+
+          $stream = [System.IO.File]::Open($candidate, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
           try { $stream.WriteByte(0x42) } finally { $stream.Dispose() }
-          & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -EncodedCommand $encoded
+
+          & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts\verify_windows_unified_candidate.ps1 $candidate $expected
           $bad = $LASTEXITCODE
-          Remove-Item Env:WEBCODEX_INSTALLER_VERIFY_CLI -ErrorAction SilentlyContinue
-          Remove-Item Env:WEBCODEX_INSTALLER_VERIFY_SHA256 -ErrorAction SilentlyContinue
+
           if ($good -ne 0) { throw "matching candidate hash was rejected: $good" }
           if ($bad -eq 0) { throw "tampered candidate hash was accepted" }
           exit 0
