@@ -1,0 +1,253 @@
+name: Windows v0.4.3 upgrade synthetic E2E
+
+on:
+  push:
+    branches:
+      - fix/v043-unified-upgrade
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install nsis --yes --no-progress
+          $roots = @(
+            (Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"),
+            (Join-Path $env:ProgramFiles "NSIS\makensis.exe")
+          )
+          $makensis = $roots | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $makensis) { throw "makensis.exe not found" }
+          "MAKENSIS=$makensis" >> $env:GITHUB_ENV
+
+      - name: Build synthetic candidate CLI and inner installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path -LiteralPath $csc)) { throw "csc.exe not found" }
+
+          @'
+          using System;
+          using System.IO;
+          using System.Security.Cryptography;
+
+          public static class Candidate {
+              static string Hash(string path) {
+                  using (var sha = SHA256.Create())
+                  using (var stream = File.OpenRead(path)) {
+                      return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+                  }
+              }
+
+              static string Option(string[] args, string name) {
+                  for (int i = 0; i + 1 < args.Length; i++) {
+                      if (args[i] == name) return args[i + 1];
+                  }
+                  return null;
+              }
+
+              public static int Main(string[] args) {
+                  if (args.Length >= 2 && args[0] == "environment" && args[1] == "--help") return 0;
+                  if (args.Length >= 2 && args[0] == "environment" && args[1] == "installer-verify-same") {
+                      var runtime = Option(args, "--expected-runtime-dir");
+                      var source = Environment.GetEnvironmentVariable("STUB_CANDIDATE_BIN");
+                      if (String.IsNullOrEmpty(runtime) || String.IsNullOrEmpty(source)) return 20;
+                      var root = Directory.GetParent(runtime).FullName;
+                      var pairs = new [] {
+                          new [] { Path.Combine(source, "webcodex.exe"), Path.Combine(runtime, "webcodex.exe") },
+                          new [] { Path.Combine(source, "webcodex-server.exe"), Path.Combine(runtime, "webcodex-server.exe") },
+                          new [] { Path.Combine(source, "webcodex-runner.exe"), Path.Combine(runtime, "webcodex-runner.exe") },
+                          new [] { Path.Combine(source, "webcodex-desktop.exe"), Path.Combine(root, "WebCodex.exe") },
+                      };
+                      foreach (var pair in pairs) {
+                          if (!File.Exists(pair[0]) || !File.Exists(pair[1]) || Hash(pair[0]) != Hash(pair[1])) return 21;
+                      }
+                      return 0;
+                  }
+                  return 0;
+              }
+          }
+          '@ | Set-Content -LiteralPath Candidate.cs -Encoding ascii
+
+          @'
+          using System;
+          using System.IO;
+          using Microsoft.Win32;
+
+          public static class Inner {
+              public static int Main(string[] args) {
+                  var source = Environment.GetEnvironmentVariable("STUB_CANDIDATE_BIN");
+                  if (String.IsNullOrEmpty(source)) return 30;
+                  using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\WebCodex Desktop")) {
+                      if (key == null) return 31;
+                      var value = key.GetValue("InstallLocation") as string;
+                      if (String.IsNullOrEmpty(value)) return 32;
+                      var root = value.Trim('"');
+                      var runtime = Path.Combine(root, "webcodex-runtime");
+                      Directory.CreateDirectory(runtime);
+                      File.Copy(Path.Combine(source, "webcodex.exe"), Path.Combine(runtime, "webcodex.exe"), true);
+                      File.Copy(Path.Combine(source, "webcodex-server.exe"), Path.Combine(runtime, "webcodex-server.exe"), true);
+                      File.Copy(Path.Combine(source, "webcodex-runner.exe"), Path.Combine(runtime, "webcodex-runner.exe"), true);
+                      File.Copy(Path.Combine(source, "webcodex-desktop.exe"), Path.Combine(root, "WebCodex.exe"), true);
+                  }
+                  return 0;
+              }
+          }
+          '@ | Set-Content -LiteralPath Inner.cs -Encoding ascii
+
+          & $csc /nologo /target:exe /out:candidate-stub.exe Candidate.cs
+          if ($LASTEXITCODE -ne 0) { throw "candidate stub compile failed" }
+          & $csc /nologo /target:exe /out:inner-stub.exe Inner.cs
+          if ($LASTEXITCODE -ne 0) { throw "inner stub compile failed" }
+
+      - name: Build synthetic unified outer installer from production bootstrap
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          @'
+          import argparse
+          import hashlib
+          import json
+          import os
+          import shutil
+          import sys
+          from pathlib import Path
+          from unittest import mock
+
+          sys.path.insert(0, str(Path("scripts/tests").resolve()))
+          import test_prepare_windows_unified_installer as tests
+
+          case = tests.WindowsUnifiedNsisTests(methodName="test_outer_bootstrap_extracts_candidate_in_section_before_inner_install")
+          case.setUp()
+          try:
+              root = Path("synthetic-candidate").resolve()
+              root.mkdir()
+              infos = case.fixture(root)
+              bin_dir = root / "artifacts" / "bin"
+              stub = Path("candidate-stub.exe").resolve()
+              for name in tests.nsis.BINARIES:
+                  shutil.copyfile(stub, bin_dir / f"{name}.exe")
+
+              manifest_path = root / "source-manifest.json"
+              manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+              sums = {}
+              for name in tests.nsis.BINARIES:
+                  path = bin_dir / f"{name}.exe"
+                  rel = path.relative_to(root).as_posix()
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  manifest["artifacts"][name]["sha256"] = digest
+                  sums[rel] = digest
+              manifest["desktop_payload"]["sha256"] = tests.nsis.collector.package.tree_digest(bin_dir / "webcodex-desktop.exe")
+              manifest["desktop_payload"]["managed_files"] = [
+                  {"path": path, "sha256": manifest["artifacts"][name]["sha256"]}
+                  for path, name in sorted(tests.nsis.MANAGED_INSTALL_FILES.items())
+              ]
+              raw = json.dumps(manifest, indent=2, sort_keys=True).encode() + b"\n"
+              manifest_path.write_bytes(raw)
+              sums["source-manifest.json"] = hashlib.sha256(raw).hexdigest()
+              (root / "SHA256SUMS").write_text(
+                  "".join(f"{digest}  {name}\n" for name, digest in sorted(sums.items())),
+                  encoding="ascii",
+              )
+
+              output = Path("synthetic-unified.exe").resolve()
+              with mock.patch.object(tests.nsis.collector, "probe", side_effect=lambda path, name: infos[name]):
+                  tests.bootstrap.build(argparse.Namespace(
+                      candidate_dir=root,
+                      inner_installer=Path("inner-stub.exe").resolve(),
+                      platform="win32-x64",
+                      output=output,
+                      makensis=os.environ["MAKENSIS"],
+                  ))
+          finally:
+              case.doCleanups()
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw "synthetic unified installer build failed" }
+
+      - name: Install official v0.4.3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path legacy | Out-Null
+          $base = "https://github.com/yyjeqhc/webcodex/releases/download/v0.4.3"
+          $installer = Join-Path $PWD "legacy\webcodex-desktop-v0.4.3-win32-x64-setup.exe"
+          $sums = Join-Path $PWD "legacy\SHA256SUMS"
+          Invoke-WebRequest -UseBasicParsing "$base/webcodex-desktop-v0.4.3-win32-x64-setup.exe" -OutFile $installer
+          Invoke-WebRequest -UseBasicParsing "$base/SHA256SUMS" -OutFile $sums
+          $line = Get-Content -LiteralPath $sums | Where-Object { $_ -match 'webcodex-desktop-v0\.4\.3-win32-x64-setup\.exe$' } | Select-Object -First 1
+          $expected = ($line -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "official v0.4.3 checksum mismatch" }
+          $p = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "official v0.4.3 installation failed" }
+
+          $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\WebCodex Desktop"
+          $root = (Get-ItemProperty -LiteralPath $key).InstallLocation.Trim('"')
+          Set-Content -LiteralPath (Join-Path $root "legacy-upgrade-sentinel.txt") -Value "preserve-me" -Encoding ascii
+          "LEGACY_INSTALL_ROOT=$root" >> $env:GITHUB_ENV
+
+      - name: Upgrade v0.4.3 through patched outer bootstrap
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:STUB_CANDIDATE_BIN = (Resolve-Path "synthetic-candidate\artifacts\bin").Path
+          $p = Start-Process -FilePath (Resolve-Path "synthetic-unified.exe") -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "patched synthetic unified upgrade failed with exit code $($p.ExitCode)" }
+
+          $root = $env:LEGACY_INSTALL_ROOT
+          $runtime = Join-Path $root "webcodex-runtime"
+          $pairs = @(
+            @((Join-Path $env:STUB_CANDIDATE_BIN "webcodex.exe"), (Join-Path $runtime "webcodex.exe")),
+            @((Join-Path $env:STUB_CANDIDATE_BIN "webcodex-server.exe"), (Join-Path $runtime "webcodex-server.exe")),
+            @((Join-Path $env:STUB_CANDIDATE_BIN "webcodex-runner.exe"), (Join-Path $runtime "webcodex-runner.exe")),
+            @((Join-Path $env:STUB_CANDIDATE_BIN "webcodex-desktop.exe"), (Join-Path $root "WebCodex.exe"))
+          )
+          foreach ($pair in $pairs) {
+            $want = (Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash
+            $got = (Get-FileHash -LiteralPath $pair[1] -Algorithm SHA256).Hash
+            if ($want -ne $got) { throw "installed managed executable does not match synthetic candidate: $($pair[1])" }
+          }
+          if ((Get-Content -LiteralPath (Join-Path $root "legacy-upgrade-sentinel.txt") -Raw).Trim() -ne "preserve-me") {
+            throw "legacy non-managed sentinel was not preserved"
+          }
+          $environmentRecord = Join-Path $env:APPDATA "webcodex\environment\environment.json"
+          if (Test-Path -LiteralPath $environmentRecord) {
+            throw "package-only legacy upgrade unexpectedly fabricated an EnvironmentStore"
+          }
+
+          [ordered]@{
+            official_v043_installed = $true
+            patched_outer_exit = $p.ExitCode
+            all_four_managed_executables_replaced = $true
+            unmanaged_sentinel_preserved = $true
+            environment_store_fabricated = $false
+          } | ConvertTo-Json | Set-Content -LiteralPath synthetic-e2e-result.json -Encoding utf8
+
+      - name: Upload E2E evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-v043-upgrade-synthetic-e2e
+          path: |
+            synthetic-unified.nsi
+            synthetic-unified.exe
+            synthetic-e2e-result.json
+          if-no-files-found: warn
+          retention-days: 14
