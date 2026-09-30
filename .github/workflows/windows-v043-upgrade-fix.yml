@@ -131,6 +131,7 @@ jobs:
           }
           if ($good -ne 0) { throw "matching candidate hash was rejected: $good" }
           if ($bad -eq 0) { throw "tampered candidate hash was accepted" }
+          exit 0
 
       - name: Install and classify official v0.4.3
         shell: pwsh
