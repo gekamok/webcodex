@@ -11,19 +11,40 @@ $ErrorActionPreference = 'Stop'
 
 function Write-DebugEvidence([string]$Message) {
     if ($env:WEBCODEX_INSTALLER_VERIFY_DEBUG -eq '1') {
-        Add-Content -LiteralPath (Join-Path $env:TEMP 'webcodex-installer-verify.log') -Value $Message -Encoding UTF8
+        try {
+            $path = [System.IO.Path]::Combine($env:TEMP, 'webcodex-installer-verify.log')
+            [System.IO.File]::AppendAllText($path, $Message + [Environment]::NewLine, [System.Text.Encoding]::UTF8)
+        } catch {
+        }
     }
 }
 
 Write-DebugEvidence ("candidate=" + $CandidatePath)
-Write-DebugEvidence ("exists=" + (Test-Path -LiteralPath $CandidatePath -PathType Leaf))
+Write-DebugEvidence ("exists=" + [System.IO.File]::Exists($CandidatePath))
 Write-DebugEvidence ("expected=" + $ExpectedSha256)
 
+$stream = $null
+$sha = $null
 try {
-    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $CandidatePath).Hash.ToLowerInvariant()
+    $stream = [System.IO.File]::Open(
+        $CandidatePath,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $bytes = $sha.ComputeHash($stream)
+    $actual = [System.BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()
 } catch {
     Write-DebugEvidence ("error=" + $_.Exception.Message)
     exit 2
+} finally {
+    if ($sha -ne $null) {
+        $sha.Dispose()
+    }
+    if ($stream -ne $null) {
+        $stream.Dispose()
+    }
 }
 
 Write-DebugEvidence ("actual=" + $actual)
