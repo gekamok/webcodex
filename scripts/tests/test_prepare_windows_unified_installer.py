@@ -167,6 +167,7 @@ class WindowsUnifiedNsisTests(unittest.TestCase):
             self.assertIn("upgrade-rollback", script)
             self.assertIn(r'"$WebCodexTrustedCLI" environment upgrade-rollback', script)
             self.assertIn("Get-FileHash -Algorithm SHA256", section)
+            self.assertRegex(section, r"if\(\$h -ne '[0-9a-f]{64}'\)\{exit 1\}")
             self.assertIn("manifest-bound SHA-256 check", section)
             self.assertIn('"$WebCodexTrustedCLI" environment installer-verify-same', section)
             self.assertIn('"$WebCodexInstallDir\\webcodex-runtime\\webcodex.exe" environment --help', section)
