@@ -122,7 +122,8 @@ jobs:
           try {
             & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -EncodedCommand $encoded
             $good = $LASTEXITCODE
-            [System.IO.File]::AppendAllBytes((Resolve-Path "webcodex.exe"), [byte[]](0x42))
+            $stream = [System.IO.File]::Open((Resolve-Path "webcodex.exe"), [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+            try { $stream.WriteByte(0x42) } finally { $stream.Dispose() }
             & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -EncodedCommand $encoded
             $bad = $LASTEXITCODE
           } finally {
