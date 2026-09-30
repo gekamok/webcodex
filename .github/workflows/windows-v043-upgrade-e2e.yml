@@ -47,7 +47,9 @@ jobs:
           use std::{env, fs, path::{Path, PathBuf}, process};
 
           fn log(text: &str) {
-              if let Ok(path) = env::var("STUB_LOG") {
+              let mut paths = vec![env::temp_dir().join("webcodex-stub.log")];
+              if let Ok(path) = env::var("STUB_LOG") { paths.push(path.into()); }
+              for path in paths {
                   let old = fs::read_to_string(&path).unwrap_or_default();
                   let _ = fs::write(path, format!("{old}candidate {text}\n"));
               }
@@ -95,7 +97,9 @@ jobs:
           use std::{env, fs, path::PathBuf, process};
 
           fn log(text: &str) {
-              if let Ok(path) = env::var("STUB_LOG") {
+              let mut paths = vec![env::temp_dir().join("webcodex-stub.log")];
+              if let Ok(path) = env::var("STUB_LOG") { paths.push(path.into()); }
+              for path in paths {
                   let old = fs::read_to_string(&path).unwrap_or_default();
                   let _ = fs::write(path, format!("{old}inner {text}\n"));
               }
@@ -217,10 +221,28 @@ jobs:
           $env:STUB_CANDIDATE_BIN = (Resolve-Path "synthetic-candidate\artifacts\bin").Path
           $env:STUB_INSTALL_ROOT = $env:LEGACY_INSTALL_ROOT
           $env:STUB_LOG = Join-Path $PWD "stub-invocations.log"
+          Remove-Item -LiteralPath (Join-Path $env:TEMP "webcodex-stub.log") -Force -ErrorAction SilentlyContinue
           $p = Start-Process -FilePath (Resolve-Path "synthetic-unified.exe") -ArgumentList "/S" -PassThru
-          if (-not $p.WaitForExit(60000)) {
+          if (-not $p.WaitForExit(15000)) {
+            "===== process snapshot after 15s ====="
+            Get-CimInstance Win32_Process |
+              Where-Object { $_.Name -match 'synthetic-unified|webcodex|powershell|inner-stub|candidate-stub' } |
+              Select-Object ProcessId,ParentProcessId,Name,CommandLine |
+              Format-List | Out-String | Write-Host
+            "===== stub log ====="
+            foreach ($path in @($env:STUB_LOG, (Join-Path $env:TEMP "webcodex-stub.log"))) {
+              if (Test-Path -LiteralPath $path) { Get-Content -LiteralPath $path }
+            }
+          }
+          if (-not $p.WaitForExit(45000)) {
+            Get-CimInstance Win32_Process |
+              Where-Object { $_.Name -match 'synthetic-unified|webcodex|powershell|inner-stub|candidate-stub' } |
+              Select-Object ProcessId,ParentProcessId,Name,CommandLine |
+              Format-List | Out-String | Write-Host
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-            if (Test-Path -LiteralPath $env:STUB_LOG) { Get-Content -LiteralPath $env:STUB_LOG }
+            foreach ($path in @($env:STUB_LOG, (Join-Path $env:TEMP "webcodex-stub.log"))) {
+              if (Test-Path -LiteralPath $path) { Get-Content -LiteralPath $path }
+            }
             throw "patched synthetic unified upgrade did not terminate within 60 seconds"
           }
           if ($p.ExitCode -ne 0) {
