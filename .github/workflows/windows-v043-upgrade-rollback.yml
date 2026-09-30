@@ -1,0 +1,294 @@
+name: Windows v0.4.3 upgrade rollback E2E
+
+on:
+  push:
+    branches:
+      - fix/v043-unified-upgrade-ps1
+    paths:
+      - ".github/workflows/windows-v043-upgrade-rollback.yml"
+      - "scripts/build_windows_unified_bootstrap.py"
+      - "scripts/verify_windows_unified_candidate.ps1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install nsis --yes --no-progress
+          $roots = @(
+            (Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"),
+            (Join-Path $env:ProgramFiles "NSIS\makensis.exe")
+          )
+          $makensis = $roots | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $makensis) { throw "makensis.exe not found" }
+          "MAKENSIS=$makensis" >> $env:GITHUB_ENV
+
+      - name: Build candidate and intentionally broken inner installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          @'
+          use std::{env, fs, path::{Path, PathBuf}, process};
+
+          fn log(text: &str) {
+              if let Ok(path) = env::var("STUB_LOG") {
+                  let old = fs::read_to_string(&path).unwrap_or_default();
+                  let _ = fs::write(path, format!("{old}candidate {text}\n"));
+              }
+          }
+
+          fn option(args: &[String], name: &str) -> Option<String> {
+              args.windows(2).find(|pair| pair[0] == name).map(|pair| pair[1].clone())
+          }
+
+          fn same(a: impl AsRef<Path>, b: impl AsRef<Path>) -> bool {
+              fs::read(a).ok().zip(fs::read(b).ok()).is_some_and(|(a, b)| a == b)
+          }
+
+          fn main() {
+              let args: Vec<String> = env::args().skip(1).collect();
+              log(&format!("args={}", args.join(" ")));
+              if args.as_slice().starts_with(&["environment".into(), "--help".into()]) {
+                  return;
+              }
+              if args.len() >= 2 && args[0] == "environment" && args[1] == "installer-verify-same" {
+                  let Some(runtime) = option(&args, "--expected-runtime-dir").map(PathBuf::from) else { process::exit(20) };
+                  let Some(source) = env::var_os("STUB_CANDIDATE_BIN").map(PathBuf::from) else { process::exit(20) };
+                  let Some(root) = runtime.parent() else { process::exit(20) };
+                  let pairs = [
+                      (source.join("webcodex.exe"), runtime.join("webcodex.exe")),
+                      (source.join("webcodex-server.exe"), runtime.join("webcodex-server.exe")),
+                      (source.join("webcodex-runner.exe"), runtime.join("webcodex-runner.exe")),
+                      (source.join("webcodex-desktop.exe"), root.join("WebCodex.exe")),
+                  ];
+                  for (expected, installed) in pairs {
+                      if !same(&expected, &installed) {
+                          log(&format!("verify=21 {}", installed.display()));
+                          process::exit(21);
+                      }
+                  }
+                  log("verify=0");
+                  return;
+              }
+              log("unexpected=22");
+              process::exit(22);
+          }
+          '@ | Set-Content -LiteralPath candidate.rs -Encoding utf8
+
+          @'
+          use std::{env, fs, io::Write, path::PathBuf, process};
+
+          fn log(text: &str) {
+              if let Ok(path) = env::var("STUB_LOG") {
+                  let old = fs::read_to_string(&path).unwrap_or_default();
+                  let _ = fs::write(path, format!("{old}inner {text}\n"));
+              }
+          }
+
+          fn main() {
+              log("start");
+              let Some(source) = env::var_os("STUB_CANDIDATE_BIN").map(PathBuf::from) else { process::exit(30) };
+              let Some(root) = env::var_os("STUB_INSTALL_ROOT").map(PathBuf::from) else { process::exit(31) };
+              let runtime = root.join("webcodex-runtime");
+              if fs::create_dir_all(&runtime).is_err() { process::exit(32) }
+              for (src, dst) in [
+                  (source.join("webcodex.exe"), runtime.join("webcodex.exe")),
+                  (source.join("webcodex-server.exe"), runtime.join("webcodex-server.exe")),
+                  (source.join("webcodex-runner.exe"), runtime.join("webcodex-runner.exe")),
+                  (source.join("webcodex-desktop.exe"), root.join("WebCodex.exe")),
+              ] {
+                  if fs::copy(src, dst).is_err() { process::exit(33) }
+              }
+              let broken = runtime.join("webcodex-runner.exe");
+              let Ok(mut file) = fs::OpenOptions::new().append(true).open(&broken) else { process::exit(34) };
+              if file.write_all(b"BROKEN").is_err() { process::exit(35) }
+              log("copies=done runner=corrupted");
+          }
+          '@ | Set-Content -LiteralPath inner.rs -Encoding utf8
+
+          rustc -O candidate.rs -o candidate-stub.exe
+          if ($LASTEXITCODE -ne 0) { throw "candidate stub compile failed" }
+          rustc -O inner.rs -o inner-broken.exe
+          if ($LASTEXITCODE -ne 0) { throw "inner stub compile failed" }
+
+      - name: Build rollback-test outer installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          @'
+          import argparse
+          import hashlib
+          import json
+          import os
+          import shutil
+          import sys
+          from pathlib import Path
+          from unittest import mock
+
+          sys.path.insert(0, str(Path("scripts/tests").resolve()))
+          import test_prepare_windows_unified_installer as tests
+
+          case = tests.WindowsUnifiedNsisTests(methodName="test_outer_bootstrap_extracts_candidate_in_section_before_inner_install")
+          case.setUp()
+          try:
+              root = Path("rollback-candidate").resolve()
+              root.mkdir()
+              infos = case.fixture(root)
+              bin_dir = root / "artifacts" / "bin"
+              stub = Path("candidate-stub.exe").resolve()
+              for name in tests.nsis.BINARIES:
+                  shutil.copyfile(stub, bin_dir / f"{name}.exe")
+
+              manifest_path = root / "source-manifest.json"
+              manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+              sums = {}
+              for name in tests.nsis.BINARIES:
+                  path = bin_dir / f"{name}.exe"
+                  rel = path.relative_to(root).as_posix()
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  manifest["artifacts"][name]["sha256"] = digest
+                  sums[rel] = digest
+              manifest["desktop_payload"]["sha256"] = tests.nsis.collector.package.tree_digest(bin_dir / "webcodex-desktop.exe")
+              manifest["desktop_payload"]["managed_files"] = [
+                  {"path": path, "sha256": manifest["artifacts"][name]["sha256"]}
+                  for path, name in sorted(tests.nsis.MANAGED_INSTALL_FILES.items())
+              ]
+              raw = json.dumps(manifest, indent=2, sort_keys=True).encode() + b"\n"
+              manifest_path.write_bytes(raw)
+              sums["source-manifest.json"] = hashlib.sha256(raw).hexdigest()
+              (root / "SHA256SUMS").write_text(
+                  "".join(f"{digest}  {name}\n" for name, digest in sorted(sums.items())),
+                  encoding="ascii",
+              )
+
+              with mock.patch.object(tests.nsis.collector, "probe", side_effect=lambda path, name: infos[name]):
+                  tests.bootstrap.build(argparse.Namespace(
+                      candidate_dir=root,
+                      inner_installer=Path("inner-broken.exe").resolve(),
+                      platform="win32-x64",
+                      output=Path("rollback-unified.exe").resolve(),
+                      makensis=os.environ["MAKENSIS"],
+                  ))
+          finally:
+              case.doCleanups()
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw "rollback-test outer installer build failed" }
+
+      - name: Install official v0.4.3 and capture baseline hashes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path legacy | Out-Null
+          $base = "https://github.com/yyjeqhc/webcodex/releases/download/v0.4.3"
+          $installer = Join-Path $PWD "legacy\webcodex-desktop-v0.4.3-win32-x64-setup.exe"
+          $sums = Join-Path $PWD "legacy\SHA256SUMS"
+          Invoke-WebRequest -UseBasicParsing "$base/webcodex-desktop-v0.4.3-win32-x64-setup.exe" -OutFile $installer
+          Invoke-WebRequest -UseBasicParsing "$base/SHA256SUMS" -OutFile $sums
+          $line = Get-Content -LiteralPath $sums | Where-Object { $_ -match 'webcodex-desktop-v0\.4\.3-win32-x64-setup\.exe$' } | Select-Object -First 1
+          if (-not $line) { throw "v0.4.3 checksum missing" }
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne ($line -split '\s+')[0].ToLowerInvariant()) {
+            throw "v0.4.3 checksum mismatch"
+          }
+          $p = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "v0.4.3 install failed" }
+
+          $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\WebCodex Desktop"
+          $root = (Get-ItemProperty -LiteralPath $key).InstallLocation.Trim('"')
+          $runtime = Join-Path $root "webcodex-runtime"
+          $targets = [ordered]@{
+            desktop = Join-Path $root "WebCodex.exe"
+            cli = Join-Path $runtime "webcodex.exe"
+            server = Join-Path $runtime "webcodex-server.exe"
+            runner = Join-Path $runtime "webcodex-runner.exe"
+          }
+          $hashes = [ordered]@{}
+          foreach ($entry in $targets.GetEnumerator()) {
+            $hashes[$entry.Key] = (Get-FileHash -LiteralPath $entry.Value -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          $hashes | ConvertTo-Json | Set-Content -LiteralPath v043-baseline-hashes.json -Encoding utf8
+          Set-Content -LiteralPath (Join-Path $root "legacy-rollback-sentinel.txt") -Value "preserve-me" -Encoding ascii
+          "LEGACY_INSTALL_ROOT=$root" >> $env:GITHUB_ENV
+
+      - name: Force post-install verification failure and require rollback
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:STUB_CANDIDATE_BIN = (Resolve-Path "rollback-candidate\artifacts\bin").Path
+          $env:STUB_INSTALL_ROOT = $env:LEGACY_INSTALL_ROOT
+          $env:STUB_LOG = Join-Path $PWD "rollback-stub.log"
+
+          $p = Start-Process -FilePath (Resolve-Path "rollback-unified.exe") -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -eq 0) {
+            throw "rollback scenario unexpectedly reported installer success"
+          }
+
+          $baseline = Get-Content -LiteralPath v043-baseline-hashes.json -Raw | ConvertFrom-Json
+          $root = $env:LEGACY_INSTALL_ROOT
+          $runtime = Join-Path $root "webcodex-runtime"
+          $targets = [ordered]@{
+            desktop = Join-Path $root "WebCodex.exe"
+            cli = Join-Path $runtime "webcodex.exe"
+            server = Join-Path $runtime "webcodex-server.exe"
+            runner = Join-Path $runtime "webcodex-runner.exe"
+          }
+          foreach ($entry in $targets.GetEnumerator()) {
+            $actual = (Get-FileHash -LiteralPath $entry.Value -Algorithm SHA256).Hash.ToLowerInvariant()
+            $expected = $baseline.($entry.Key)
+            if ($actual -ne $expected) {
+              throw "rollback did not restore $($entry.Key): expected $expected got $actual"
+            }
+          }
+          if ((Get-Content -LiteralPath (Join-Path $root "legacy-rollback-sentinel.txt") -Raw).Trim() -ne "preserve-me") {
+            throw "rollback changed non-managed sentinel"
+          }
+          if (Test-Path -LiteralPath (Join-Path $env:APPDATA "webcodex\environment\environment.json")) {
+            throw "rollback scenario fabricated EnvironmentStore state"
+          }
+
+          $log = @(Get-Content -LiteralPath $env:STUB_LOG -ErrorAction Stop)
+          if (-not ($log | Where-Object { $_ -like 'inner copies=done runner=corrupted*' })) {
+            throw "broken inner installer did not reach corruption point"
+          }
+          $verifies = @($log | Where-Object { $_ -like 'candidate verify=*' })
+          if ($verifies.Count -lt 2 -or $verifies[-1] -notlike 'candidate verify=21*') {
+            throw "post-install candidate verification did not fail as intended"
+          }
+
+          [ordered]@{
+            official_v043_installed = $true
+            outer_failed_as_expected = $true
+            forced_post_verify_failure = $true
+            all_four_v043_files_restored = $true
+            unmanaged_sentinel_preserved = $true
+            environment_store_fabricated = $false
+          } | ConvertTo-Json | Set-Content -LiteralPath rollback-e2e-result.json -Encoding utf8
+
+      - name: Upload rollback evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-v043-upgrade-rollback-e2e
+          path: |
+            rollback-unified.nsi
+            rollback-e2e-result.json
+            rollback-stub.log
+            v043-baseline-hashes.json
+          if-no-files-found: warn
+          retention-days: 14
