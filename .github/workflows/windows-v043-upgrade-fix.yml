@@ -1,0 +1,165 @@
+name: Windows v0.4.3 upgrade fix
+
+on:
+  push:
+    branches:
+      - fix/v043-unified-upgrade
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Run focused Windows unified installer tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python scripts/tests/test_prepare_windows_unified_installer.py
+          if ($LASTEXITCODE -ne 0) { throw "focused Python tests failed" }
+
+      - name: Install NSIS compiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install nsis --yes --no-progress
+          $roots = @(
+            (Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"),
+            (Join-Path $env:ProgramFiles "NSIS\makensis.exe")
+          )
+          $makensis = $roots | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $makensis) { throw "makensis.exe not found" }
+          "MAKENSIS=$makensis" >> $env:GITHUB_ENV
+
+      - name: Compile rendered outer bootstrap
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          @'
+          import argparse
+          import os
+          import sys
+          import tempfile
+          from pathlib import Path
+          from unittest import mock
+
+          sys.path.insert(0, str(Path("scripts/tests").resolve()))
+          import test_prepare_windows_unified_installer as tests
+
+          case = tests.WindowsUnifiedNsisTests(methodName="test_outer_bootstrap_extracts_candidate_in_section_before_inner_install")
+          case.setUp()
+          try:
+              with tempfile.TemporaryDirectory() as temp:
+                  temp = Path(temp)
+                  root = temp / "candidate"
+                  root.mkdir()
+                  infos = case.fixture(root)
+                  inner = temp / "inner.exe"
+                  inner.write_bytes(tests.pe(0x8664))
+                  output = Path("bootstrap-smoke.exe").resolve()
+                  with mock.patch.object(tests.nsis.collector, "probe", side_effect=lambda path, name: infos[name]):
+                      tests.bootstrap.build(argparse.Namespace(
+                          candidate_dir=root,
+                          inner_installer=inner,
+                          platform="win32-x64",
+                          output=output,
+                          makensis=os.environ["MAKENSIS"],
+                      ))
+                  script = output.with_suffix(".nsi")
+                  if not output.is_file() or not script.is_file():
+                      raise SystemExit("outer bootstrap compile did not produce expected files")
+                  text = script.read_text(encoding="utf-8")
+                  required = [
+                      "WebCodexLegacyInstall",
+                      "environment --help",
+                      "WebCodexLegacyBackup",
+                      "webcodex_run_inner_installer:",
+                      "environment installer-verify-same",
+                  ]
+                  for needle in required:
+                      if needle not in text:
+                          raise SystemExit(f"compiled bootstrap missing {needle}")
+          finally:
+              case.doCleanups()
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw "outer NSIS bootstrap compile smoke failed" }
+
+      - name: Install and classify official v0.4.3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path legacy | Out-Null
+          $base = "https://github.com/yyjeqhc/webcodex/releases/download/v0.4.3"
+          $installer = Join-Path $PWD "legacy\webcodex-desktop-v0.4.3-win32-x64-setup.exe"
+          $sums = Join-Path $PWD "legacy\SHA256SUMS"
+          Invoke-WebRequest -UseBasicParsing "$base/webcodex-desktop-v0.4.3-win32-x64-setup.exe" -OutFile $installer
+          Invoke-WebRequest -UseBasicParsing "$base/SHA256SUMS" -OutFile $sums
+          $line = Get-Content -LiteralPath $sums | Where-Object { $_ -match 'webcodex-desktop-v0\.4\.3-win32-x64-setup\.exe$' } | Select-Object -First 1
+          if (-not $line) { throw "v0.4.3 checksum entry missing" }
+          $expected = ($line -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "v0.4.3 checksum mismatch" }
+
+          $proc = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "v0.4.3 installer failed: $($proc.ExitCode)" }
+          $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\WebCodex Desktop"
+          $root = (Get-ItemProperty -LiteralPath $key).InstallLocation.Trim('"')
+          $cli = Join-Path $root "webcodex-runtime\webcodex.exe"
+          $version = ((& $cli --version) -join " ")
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '0\.4\.3') { throw "legacy CLI identity mismatch: $version" }
+
+          $psi = [System.Diagnostics.ProcessStartInfo]::new()
+          $psi.FileName = $cli
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardOutput = $true
+          $psi.RedirectStandardError = $true
+          foreach ($arg in @("environment","--help")) { [void]$psi.ArgumentList.Add($arg) }
+          $p = [System.Diagnostics.Process]::new()
+          $p.StartInfo = $psi
+          [void]$p.Start()
+          $stdout = $p.StandardOutput.ReadToEnd()
+          $stderr = $p.StandardError.ReadToEnd()
+          $p.WaitForExit()
+          if ($p.ExitCode -eq 0) { throw "official v0.4.3 unexpectedly supports environment namespace" }
+
+          $environmentRecord = Join-Path $env:APPDATA "webcodex\environment\environment.json"
+          if (Test-Path -LiteralPath $environmentRecord) {
+            throw "official v0.4.3 unexpectedly created current EnvironmentStore state"
+          }
+          $managed = @(Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith("WebCodex") })
+          if ($managed.Count -ne 0) {
+            throw "official v0.4.3 unexpectedly installed current managed services"
+          }
+
+          [ordered]@{
+            version = $version
+            environment_help_exit = $p.ExitCode
+            environment_record_present = $false
+            managed_service_count = $managed.Count
+            expected_fix_path = "legacy-package-upgrade"
+          } | ConvertTo-Json | Set-Content -LiteralPath v043-classification.json -Encoding utf8
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-v043-upgrade-fix-evidence
+          path: |
+            bootstrap-smoke.nsi
+            bootstrap-smoke.exe
+            bootstrap-smoke.exe.provenance.json
+            v043-classification.json
+          if-no-files-found: warn
+          retention-days: 14
