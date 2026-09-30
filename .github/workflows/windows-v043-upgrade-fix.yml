@@ -96,6 +96,41 @@ jobs:
           '@ | python -
           if ($LASTEXITCODE -ne 0) { throw "outer NSIS bootstrap compile smoke failed" }
 
+      - name: Exercise encoded candidate hash gate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          @'
+          import re
+          from pathlib import Path
+          text = Path("bootstrap-smoke.nsi").read_text(encoding="utf-8")
+          match = re.search(r"-EncodedCommand ([A-Za-z0-9+/=]+)", text)
+          if not match:
+              raise SystemExit("encoded hash command missing")
+          Path("hash-command.txt").write_text(match.group(1), encoding="ascii")
+          data = bytearray(128)
+          data[:2] = b"MZ"
+          data[0x3C:0x40] = (64).to_bytes(4, "little")
+          data[64:68] = b"PE\0\0"
+          data[68:70] = (0x8664).to_bytes(2, "little")
+          root = Path("hash-fixture")
+          root.mkdir(exist_ok=True)
+          (root / "webcodex.exe").write_bytes(data)
+          '@ | python -
+          $encoded = (Get-Content -LiteralPath hash-command.txt -Raw).Trim()
+          Push-Location hash-fixture
+          try {
+            & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -EncodedCommand $encoded
+            $good = $LASTEXITCODE
+            [System.IO.File]::AppendAllBytes((Resolve-Path "webcodex.exe"), [byte[]](0x42))
+            & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -EncodedCommand $encoded
+            $bad = $LASTEXITCODE
+          } finally {
+            Pop-Location
+          }
+          if ($good -ne 0) { throw "matching candidate hash was rejected: $good" }
+          if ($bad -eq 0) { throw "tampered candidate hash was accepted" }
+
       - name: Install and classify official v0.4.3
         shell: pwsh
         run: |
