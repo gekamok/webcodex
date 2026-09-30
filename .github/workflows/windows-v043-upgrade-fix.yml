@@ -3,7 +3,7 @@ name: Windows v0.4.3 upgrade fix
 on:
   push:
     branches:
-      - fix/v043-unified-upgrade
+      - fix/v043-unified-upgrade-ps1
   workflow_dispatch:
 
 permissions:
