@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
 import shutil
@@ -35,14 +34,7 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         raise ValueError("inner Tauri installer is not a Windows executable")
     target = "x86_64" if platform == "win32-x64" else "aarch64"
     cli_sha256 = manifest["artifacts"]["webcodex"]["sha256"]
-    hash_script = (
-        "$p=$env:WEBCODEX_INSTALLER_VERIFY_CLI;"
-        "$e=$env:WEBCODEX_INSTALLER_VERIFY_SHA256;"
-        "if([string]::IsNullOrEmpty($p)-or[string]::IsNullOrEmpty($e)){exit 1};"
-        "$h=(Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant();"
-        "if($h -ne $e){exit 1}"
-    )
-    hash_command = base64.b64encode(hash_script.encode("utf-16le")).decode("ascii")
+    hash_verifier = Path(__file__).with_name("verify_windows_unified_candidate.ps1").resolve(strict=True)
     lines = [
         'Unicode true',
         '!include "LogicLib.nsh"',
@@ -114,6 +106,8 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         '  Goto webcodex_service_scan',
         'webcodex_services_checked:',
         '  InitPluginsDir',
+        '  SetOutPath "$PLUGINSDIR"',
+        f'  File /oname=WebCodexVerifyCandidate.ps1 {nsis_quote(hash_verifier)}',
         '  StrCpy $WebCodexCandidate "$PLUGINSDIR\\WebCodexUpgradeCandidate"',
         '  SetOutPath "$WebCodexCandidate"',
         f'  File /oname=source-manifest.json {nsis_quote(candidate_dir / "source-manifest.json")}',
@@ -123,17 +117,7 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
     for name in candidate.BINARIES:
         lines.append(f'  File /oname={name}.exe {nsis_quote(files[name])}')
     lines.extend([
-        '  System::Call \'Kernel32::SetEnvironmentVariable(t "WEBCODEX_INSTALLER_VERIFY_CLI", t "$WebCodexCandidate\\artifacts\\bin\\webcodex.exe") i .r4\'',
-        f'  System::Call \'Kernel32::SetEnvironmentVariable(t "WEBCODEX_INSTALLER_VERIFY_SHA256", t "{cli_sha256}") i .r5\'',
-        '  ${If} $4 == 0',
-        '  ${OrIf} $5 == 0',
-        '    MessageBox MB_ICONSTOP "WebCodex could not prepare the candidate integrity check."',
-        '    SetErrorLevel 1',
-        '    Abort',
-        '  ${EndIf}',
-        f'  ExecWait \'"$WINDIR\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -EncodedCommand {hash_command}\' $0',
-        '  System::Call \'Kernel32::SetEnvironmentVariable(t "WEBCODEX_INSTALLER_VERIFY_CLI", p 0) i .r4\'',
-        '  System::Call \'Kernel32::SetEnvironmentVariable(t "WEBCODEX_INSTALLER_VERIFY_SHA256", p 0) i .r5\'',
+        f'  ExecWait \'"$WINDIR\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\\WebCodexVerifyCandidate.ps1" "$WebCodexCandidate\\artifacts\\bin\\webcodex.exe" "{cli_sha256}"\' $0',
         '  ${If} $0 != 0',
         '    MessageBox MB_ICONSTOP "WebCodex candidate CLI failed its manifest-bound SHA-256 check."',
         '    SetErrorLevel 1',
